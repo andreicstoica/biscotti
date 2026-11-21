@@ -1,0 +1,42 @@
+[Unit]
+Description=Biscotti NixOS VM (QEMU/KVM with nested virtualization)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ass
+Group=ass
+RuntimeDirectory=biscotti-vm
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/qemu-system-x86_64 \
+  -name biscotti \
+  -machine q35,accel=kvm \
+  -cpu host \
+  -smp 4 \
+  -m 8192 \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
+  -drive if=pflash,format=raw,file=/home/ass/.local/share/biscotti-vm/OVMF_VARS.4m.fd \
+  -drive if=virtio,format=qcow2,file=/home/ass/.local/share/biscotti-vm/biscotti.qcow2,cache=none,aio=threads \
+  -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22 \
+  -qmp unix:/run/biscotti-vm/qmp.sock,server=on,wait=off \
+  -nographic \
+  -serial stdio \
+  -monitor none
+ExecStop=/usr/bin/python3 -c '\
+import socket, time; \
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); \
+s.settimeout(5); \
+s.connect("/run/biscotti-vm/qmp.sock"); \
+s.recv(4096); \
+s.sendall(b"{\"execute\":\"qmp_capabilities\"}\n"); \
+s.recv(4096); \
+s.sendall(b"{\"execute\":\"system_powerdown\"}\n"); \
+s.close(); \
+time.sleep(1)'
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -43,6 +43,11 @@
         specialArgs = specialArgs // { target = "aws"; };
         modules = [ ./nix/biscotti.nix ./nix/aws.nix ];
       };
+      omarchy = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = specialArgs // { target = "omarchy"; };
+        modules = [ ./nix/biscotti.nix ./nix/omarchy.nix ];
+      };
     };
 
     checks.aarch64-linux.pi5-card = nixpkgs.legacyPackages.aarch64-linux.testers.runNixOSTest (import ./nix/tests/pi5-card.nix { specialArgs = specialArgs // { target = "pi5"; }; });
@@ -51,5 +56,6 @@
     packages.aarch64-linux.mac-image = self.nixosConfigurations.mac.config.system.build.images.qemu-efi;
     # A ready AMI, for uploading with `aws ec2 import-snapshot` instead of the user-data route.
     packages.x86_64-linux.aws-image = self.nixosConfigurations.aws.config.system.build.images.amazon;
+    packages.x86_64-linux.omarchy-image = self.nixosConfigurations.omarchy.config.system.build.images.qemu-efi;
   };
 }
