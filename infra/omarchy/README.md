@@ -7,43 +7,45 @@ The VM uses user-mode networking with localhost SSH forwarding (`127.0.0.1:2222 
 ## 1. Install QEMU + OVMF on Omarchy
 
 ```bash
-sudo pacman -S --needed qemu-base edk2-ovmf
+ssh -t ass@100.77.114.41 'sudo pacman -S --needed qemu-base edk2-ovmf'
 ```
 
 ## 2. Build the NixOS image on Omarchy
 
-No host Nix install required — builds inside a `nixos/nix` Docker container using `/dev/kvm`:
+Builds inside a `nixos/nix` Docker container using `/dev/kvm` (no host Nix install):
 
 ```bash
-infra/omarchy/build-image.sh
+ssh ass@100.77.114.41 '~/apps/biscotti/infra/omarchy/build-image.sh'
 ```
 
 ## 3. Install and start the VM service
 
 ```bash
-sudo infra/omarchy/install.sh
+ssh -t ass@100.77.114.41 'sudo ~/apps/biscotti/infra/omarchy/install.sh'
 ```
 
-## 4. Verify the VM
+## 4. Verify the VM (from your Mac)
 
 ```bash
 infra/omarchy/verify.sh
 ```
 
-## 5. Provide settings and finish bootstrap
+## 5. Provide settings and finish bootstrap (from your Mac)
 
 Copy your filled `core/host/.env.example` into the VM:
 
 ```bash
-ssh -p 2222 biscotti@127.0.0.1 'sudo mkdir -p /var/lib/biscotti && sudo sh -c "umask 077 && cat > /var/lib/biscotti/.env"' < my.env
+ssh -J ass@100.77.114.41 -p 2222 biscotti@127.0.0.1 \
+  'sudo mkdir -p /var/lib/biscotti && sudo sh -c "umask 077 && cat > /var/lib/biscotti/.env"' < my.env
 ```
 
 `biscotti-setup.service` will pick up `.env`, build the Docker image and Firecracker desktop snapshot, and text you a Tailscale login URL. Approve the node in Tailscale, and Biscotti will text you when ready.
 
 ## Updating in place
 
-Pull/push changes to your fork, then from inside the VM:
+Push changes to your fork, then update from your Mac:
 
 ```bash
-sudo nixos-rebuild switch --flake github:andreicstoica/biscotti#omarchy
+ssh -J ass@100.77.114.41 -p 2222 biscotti@127.0.0.1 \
+  'sudo nixos-rebuild switch --flake github:andreicstoica/biscotti#omarchy'
 ```

@@ -1,30 +1,33 @@
 #!/usr/bin/env bash
-# Build the x86_64-linux NixOS qemu-efi image for Omarchy inside a nixos/nix container.
-# Idempotent: refuses to overwrite an existing live disk unless --force is passed.
+# Builds the x86_64-linux NixOS qemu-efi image inside a nixos/nix container using /dev/kvm.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT_DIR="${OUT_DIR:-/home/ass/.local/share/biscotti-vm}"
+VM_DIR="/home/ass/.local/share/biscotti-vm"
 FORCE=0
 if [ "${1:-}" = "--force" ]; then
   FORCE=1
 fi
 
-if [ -f "$OUT_DIR/biscotti.qcow2" ] && [ "$FORCE" -ne 1 ]; then
-  echo "Disk image already exists at $OUT_DIR/biscotti.qcow2 (pass --force to overwrite)."
+if [ -f "$VM_DIR/biscotti.qcow2" ] && [ "$FORCE" -ne 1 ]; then
+  echo "Disk image already exists at $VM_DIR/biscotti.qcow2 (pass --force to overwrite)."
   exit 0
 fi
 
-mkdir -p "$OUT_DIR"
+if systemctl is-active --quiet biscotti-vm.service 2>/dev/null; then
+  echo "Refusing to replace $VM_DIR/biscotti.qcow2 while biscotti-vm.service is running. Stop it first." >&2
+  exit 1
+fi
 
-# Persistent Nix store volume so rebuilds reuse cached derivations.
+mkdir -p "$VM_DIR"
+
 docker volume inspect biscotti-nix-store >/dev/null 2>&1 || docker volume create biscotti-nix-store >/dev/null
 
 docker run --rm \
   --device /dev/kvm:/dev/kvm \
   -v biscotti-nix-store:/nix \
   -v "$REPO_DIR:/src:ro" \
-  -v "$OUT_DIR:/out" \
+  -v "$VM_DIR:/out" \
   nixos/nix:latest \
   sh -euo pipefail -c '
     git config --global --add safe.directory /src
