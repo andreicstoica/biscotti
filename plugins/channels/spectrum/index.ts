@@ -31,7 +31,7 @@ export function spectrumTools() {
   let sendAttachment: ((buf: Buffer, mimeType: string, name: string) => Promise<void>) | undefined;
   let defaultPhone = "";
   return {
-    seen: (message: Reactable) => void (latest = message),
+    seen: (message: Reactable | undefined) => void (latest = message),
     bind: (send: typeof sendAttachment, phone: string) => {
       sendAttachment = send;
       defaultPhone = phone;
@@ -42,7 +42,8 @@ export function spectrumTools() {
         description: "Tapback the user's latest message (❤️ 👍 👎 😂 ‼️ ❓), e.g. 👍 when starting on something, ❤️ on thanks. Can replace a reply.",
         input: input({ emoji: str() }),
         async run({ emoji }) {
-          await latest?.react(String(emoji));
+          if (!latest) return text("No recent message to react to.");
+          await latest.react(String(emoji));
           return text("Reacted.");
         },
       },
@@ -70,7 +71,7 @@ export function spectrumTools() {
 
 export async function connect(
   env: (name: string) => string,
-  hooks: { seen?: (message: Reactable) => void; bind?: (send: ((buf: Buffer, mimeType: string, name: string) => Promise<void>) | undefined, phone: string) => void } = {},
+  hooks: { seen?: (message: Reactable | undefined) => void; bind?: (send: ((buf: Buffer, mimeType: string, name: string) => Promise<void>) | undefined, phone: string) => void } = {},
 ): Promise<Channel & { close(): Promise<void> }> {
   const app = await Spectrum({
     projectId: env("SPECTRUM_PROJECT_ID"),
@@ -82,7 +83,7 @@ export async function connect(
   const space = await im.space.create(await im.user(owner));
   hooks.bind?.(
     async (buf, mimeType, name) => void (await space.send(attachment(buf, { mimeType, name }))),
-    env("SPECTRUM_PHONE"),
+    process.env.SPECTRUM_PHONE?.trim() ?? "",
   );
 
   async function* messages() {
@@ -100,6 +101,7 @@ export async function connect(
 
   // Close the connection on shutdown: Photon keeps delivering to a dropped one for a while, so the next one hears nothing.
   const close = () => {
+    hooks.seen?.(undefined);
     hooks.bind?.(undefined, "");
     return app.stop();
   };

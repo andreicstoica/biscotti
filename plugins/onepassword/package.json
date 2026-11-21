@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@1password/sdk": "^0.4.0",
-    "@biscotti/core": "workspace:*"
+    "@biscotti/core": "workspace:*",
+    "@biscotti/secure-fill": "workspace:*"
   }
 }

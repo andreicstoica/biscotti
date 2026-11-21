@@ -140,6 +140,9 @@ importers:
       '@biscotti/core':
         specifier: workspace:*
         version: link:../../core
+      '@biscotti/secure-fill':
+        specifier: workspace:*
+        version: link:../secure-fill
 
   plugins/phoenix:
     dependencies:

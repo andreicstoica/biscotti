@@ -1,59 +1,79 @@
-import { createClient, type Client, type Item, type ItemField } from "@1password/sdk";
-import { declined, input, list, localTools, str, text, type LocalTool, type Plugin } from "@biscotti/core";
-import { browser, fill, totp } from "../secure-fill/index.ts";
+import { createClient, type Client, type Item } from "@1password/sdk";
+import { input, list, localTools, str, text, type LocalTool, type Plugin } from "@biscotti/core";
+import { createApprover, totp, typeIn } from "../secure-fill/index.ts";
 
 // Reads items from a vault-scoped 1Password Service Account and types values into a task VM's page over Chrome
 // DevTools: no model ever sees the secrets.
 
-const APPROVAL_MS = 15 * 60_000;
-const FRAMED = ", in a frame from ";
-
-const FIELD_ALIASES: Record<string, string[]> = {
-  username: ["username", "email", "user"],
-  password: ["password", "passcode", "pin"],
-  totp: ["totp", "otp", "one-time password", "onetimepassword", "2fa"],
-  number: ["ccnum", "number", "card number"],
-  cvc: ["cvv", "cvc", "verification number", "security code"],
-  expiry: ["expiry", "expiry date", "expiration date"],
+export type FieldLike = {
+  id: string;
+  title: string;
+  fieldType: string;
+  value: string;
+  details?: { type: "Otp"; content: { code?: string } } | { type: string };
 };
+
+const ALIAS_GROUPS: string[][] = [
+  ["username", "email", "user"],
+  ["password", "passcode", "pin"],
+  ["totp", "otp", "one time password", "onetimepassword", "2fa"],
+  ["number", "ccnum", "card number"],
+  ["cvc", "cvv", "verification number", "security code"],
+  ["expiry", "expiry date", "expiration date"],
+];
 
 const norm = (s: string) => s.trim().toLowerCase().replace(/[_\s-]+/g, " ");
 
-export function findField(fields: ItemField[], wanted: string): ItemField | undefined {
-  const key = norm(wanted);
-  const candidates = new Set([key, ...(FIELD_ALIASES[key] ?? [])].map(norm));
-  if (candidates.has("totp") || candidates.has("otp")) {
-    const otp = fields.find((f) => f.fieldType === "Totp" || f.details?.type === "Otp");
-    if (otp) return otp;
-  }
-  return fields.find((f) => candidates.has(norm(f.id)) || candidates.has(norm(f.title)));
+const ALIAS_MAP = new Map<string, Set<string>>();
+for (const group of ALIAS_GROUPS) {
+  const set = new Set(group);
+  for (const alias of group) ALIAS_MAP.set(alias, set);
 }
 
-export function fieldValue(field: ItemField): string {
-  if (field.details?.type === "Otp" && field.details.content.code) return field.details.content.code;
-  if (field.fieldType === "Totp") return totp(field.value);
+const isOtpField = (f: FieldLike) => f.fieldType === "Totp" || f.details?.type === "Otp";
+
+const otpCode = (f: FieldLike) => (f.details?.type === "Otp" && "content" in f.details ? f.details.content.code : undefined);
+
+export const hasValue = (f: FieldLike) => Boolean(f.value || otpCode(f));
+
+export function findField(fields: readonly FieldLike[], wanted: string): FieldLike | undefined {
+  const key = norm(wanted);
+  const candidates = ALIAS_MAP.get(key) ?? new Set([key]);
+  const exact = fields.find((f) => candidates.has(norm(f.id)) || candidates.has(norm(f.title)));
+  if (exact) return exact;
+  if (candidates.has("totp")) return fields.find(isOtpField);
+  return undefined;
+}
+
+// Prefer fresh local TOTP computation at fill time (after owner approval) over the SDK's fetch-time code, which can
+// expire if the owner takes >30s to approve.
+export function fieldValue(field: FieldLike, now = Date.now()): string {
+  if (isOtpField(field)) {
+    if (field.value) return totp(field.value, now);
+    const cached = otpCode(field);
+    if (cached) return cached;
+  }
   return field.value;
 }
 
-export function availableFieldNames(fields: ItemField[]): string[] {
-  return fields
-    .filter((f) => f.value || (f.details?.type === "Otp" && f.details.content.code))
-    .map((f) => (f.fieldType === "Totp" ? "totp" : f.title || f.id));
+export function availableFieldNames(fields: readonly FieldLike[]): string[] {
+  return fields.filter(hasValue).map((f) => (isOtpField(f) ? "totp" : f.title || f.id));
 }
 
-export function resolveFields(item: Item, wanted: string[]): { values: () => string[] } | { missing: string[]; available: string[] } {
-  const resolved: ItemField[] = [];
+export function resolveFields(
+  fields: readonly FieldLike[],
+  wanted: readonly string[],
+  now: () => number = Date.now,
+): { values: () => string[] } | { missing: string[]; available: string[] } {
+  const resolved: FieldLike[] = [];
   const missing: string[] = [];
   for (const name of wanted) {
-    const field = findField(item.fields, name);
-    if (!field || (!field.value && !(field.details?.type === "Otp" && field.details.content.code))) {
-      missing.push(name);
-    } else {
-      resolved.push(field);
-    }
+    const field = findField(fields, name);
+    if (!field || !hasValue(field)) missing.push(name);
+    else resolved.push(field);
   }
-  if (missing.length) return { missing, available: availableFieldNames(item.fields) };
-  return { values: () => resolved.map(fieldValue) };
+  if (missing.length) return { missing, available: availableFieldNames(fields) };
+  return { values: () => resolved.map((f) => fieldValue(f, now())) };
 }
 
 export default {
@@ -61,16 +81,20 @@ export default {
 \`op_fill\` to type fields into the browser without seeing them.`,
 
   async tools(ctx) {
-    const token = ctx.env("OP_SERVICE_ACCOUNT_TOKEN");
+    // Optional plugin config: read process.env directly because ctx.env() throws when a variable is unset.
+    const token = process.env.OP_SERVICE_ACCOUNT_TOKEN?.trim();
     if (!token) return localTools([]);
 
-    const vaultFilter = ctx.env("OP_VAULT").trim();
+    const vaultFilter = process.env.OP_VAULT?.trim() ?? "";
     let clientPromise: Promise<Client> | undefined;
     const getClient = () =>
       (clientPromise ??= createClient({
         auth: token,
         integrationName: "biscotti",
         integrationVersion: "0.1.0",
+      }).catch((err) => {
+        clientPromise = undefined;
+        throw err;
       }));
 
     async function scopedVaults(client: Client) {
@@ -81,31 +105,16 @@ export default {
 
     async function findItem(client: Client, title: string): Promise<Item | undefined> {
       const target = norm(title);
-      for (const vault of await scopedVaults(client)) {
-        const items = await client.items.list(vault.id);
+      const vaults = await scopedVaults(client);
+      const listed = await Promise.all(vaults.map(async (v) => ({ vault: v, items: await client.items.list(v.id) })));
+      for (const { vault, items } of listed) {
         const match = items.find((i) => norm(i.title) === target);
         if (match) return client.items.get(vault.id, match.id);
       }
       return undefined;
     }
 
-    const approvals = new Map<string, { sites: Set<string>; until: number }>();
-    function approver(task: number | undefined, entry: string, question: (where: string) => string) {
-      const key = task && `${task}\n${entry}`;
-      return async (where: string) => {
-        for (const [k, a] of approvals) if (a.until <= Date.now()) approvals.delete(k);
-        const approval = key && approvals.get(key);
-        if (approval && approval.sites.has(where)) return true;
-        const covers = key ? ` A yes covers the rest of this task's fills of "${entry}" there, for ${APPROVAL_MS / 60_000} minutes.` : "";
-        if (!(await ctx.ask(question(where) + covers))) return false;
-        if (key) {
-          const granted = approval || { sites: new Set<string>(), until: Date.now() + APPROVAL_MS };
-          granted.sites.add(where).add(where.split(FRAMED)[0]);
-          approvals.set(key, granted);
-        }
-        return true;
-      };
-    }
+    const approver = createApprover(ctx.ask);
 
     const listTool: LocalTool = {
       name: "op_list",
@@ -115,9 +124,9 @@ export default {
         const client = await getClient();
         const vaults = await scopedVaults(client);
         if (!vaults.length) return text(vaultFilter ? `No 1Password vault named "${vaultFilter}" is accessible.` : "No 1Password vaults are accessible.");
+        const perVault = await Promise.all(vaults.map((v) => client.items.list(v.id)));
         const lines: string[] = [];
-        for (const vault of vaults) {
-          const items = await client.items.list(vault.id);
+        for (const items of perVault) {
           for (const item of items) {
             const sites = item.websites.map((w) => w.url).filter(Boolean).join(", ");
             lines.push(`- ${item.title} (${item.category})${sites ? ` — ${sites}` : ""}`);
@@ -142,15 +151,13 @@ export default {
         const client = await getClient();
         const item = await findItem(client, title);
         if (!item) return text(`No 1Password item named "${title}".`);
-        const resolved = resolveFields(item, wanted);
+        const resolved = resolveFields(item.fields, wanted);
         if ("missing" in resolved) {
           return text(`"${item.title}" has no ${resolved.missing.join(", ")}; available fields: ${resolved.available.join(", ")}.`);
         }
         const question = (where: string) =>
           `A task wants to type 1Password "${item.title}" (${wanted.join(", ")}) into ${where}, for ${String(why).slice(0, 200)}. Is ${where} the right site?`;
-        return fill(browser(slot), resolved.values, approver(task, item.title, question))
-          .then((into) => (into ? text(`Typed ${wanted.join(", ")} into: ${into.join(", ")}. Check the page before submitting.`) : declined))
-          .catch((err: Error) => text(`Couldn't fill: ${err.message}`));
+        return typeIn(slot, resolved.values, approver(task, item.title, question), (into) => `Typed ${wanted.join(", ")} into: ${into.join(", ")}. Check the page before submitting.`);
       },
     };
 
