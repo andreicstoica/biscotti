@@ -1,10 +1,21 @@
-import { input, localTools, str, text, type Channel, type Plugin } from "@biscotti/core";
+import { input, localTools, optional, str, text, type Channel, type Plugin } from "@biscotti/core";
 import { attachment, Spectrum } from "@spectrum-ts/core";
 import { imessage } from "@spectrum-ts/imessage";
 
 // iMessage through Photon's Spectrum. Only the owner's one-on-one texts come through, never their group chats.
 
 type Reactable = { react(emoji: string): Promise<unknown> };
+
+const cleanVcardValue = (s: string) => s.replace(/[\r\n]+/g, " ").trim();
+
+export function vcard({ name, phone, note }: { name: string; phone?: string; note?: string }) {
+  const fn = cleanVcardValue(name) || "Biscotti";
+  const lines = ["BEGIN:VCARD", "VERSION:3.0", `N:;${fn};;;`, `FN:${fn}`];
+  if (phone && cleanVcardValue(phone)) lines.push(`TEL;TYPE=CELL;TYPE=VOICE;TYPE=pref:${cleanVcardValue(phone)}`);
+  if (note && cleanVcardValue(note)) lines.push(`NOTE:${cleanVcardValue(note)}`);
+  lines.push("END:VCARD", "");
+  return lines.join("\r\n");
+}
 
 // A link on its own line goes as its own message, so it expands into a preview.
 export function asTexts(reply: string) {
@@ -14,11 +25,17 @@ export function asTexts(reply: string) {
   return [...(body ? [body] : []), ...lines.filter(isLink).map((l) => l.trim())];
 }
 
-// Tapbacks on the owner's latest text.
-export function tapbacks() {
+// Tapbacks on the owner's latest text, plus sending a native iMessage contact card (.vcf).
+export function spectrumTools() {
   let latest: Reactable | undefined;
+  let sendAttachment: ((buf: Buffer, mimeType: string, name: string) => Promise<void>) | undefined;
+  let defaultPhone = "";
   return {
     seen: (message: Reactable) => void (latest = message),
+    bind: (send: typeof sendAttachment, phone: string) => {
+      sendAttachment = send;
+      defaultPhone = phone;
+    },
     tools: localTools([
       {
         name: "react",
@@ -29,11 +46,32 @@ export function tapbacks() {
           return text("Reacted.");
         },
       },
+      {
+        name: "send_contact_card",
+        description: "Send a native iMessage contact card (.vcf attachment) so the owner can add biscotti (or a contact) to Contacts in one tap.",
+        input: input({
+          name: optional(str("Display name on the card. Defaults to 'Biscotti'.")),
+          phone: optional(str("Phone number in E.164 format, e.g. +17739123997. Defaults to SPECTRUM_PHONE if configured.")),
+          note: optional(str("Short note on the card.")),
+        }),
+        async run({ name, phone, note }) {
+          if (!sendAttachment) return text("iMessage channel is not connected yet.");
+          const fn = String(name ?? "Biscotti").trim() || "Biscotti";
+          const tel = String(phone ?? defaultPhone).trim();
+          const card = vcard({ name: fn, phone: tel || undefined, note: note ? String(note) : "Personal assistant" });
+          const filename = `${fn.replace(/[^a-zA-Z0-9._-]+/g, "_") || "Biscotti"}.vcf`;
+          await sendAttachment(Buffer.from(card, "utf8"), "text/vcard", filename);
+          return text(`Sent contact card ${filename}${tel ? ` (${tel})` : ""}.`);
+        },
+      },
     ]),
   };
 }
 
-export async function connect(env: (name: string) => string, seen: (message: Reactable) => void = () => {}): Promise<Channel & { close(): Promise<void> }> {
+export async function connect(
+  env: (name: string) => string,
+  hooks: { seen?: (message: Reactable) => void; bind?: (send: ((buf: Buffer, mimeType: string, name: string) => Promise<void>) | undefined, phone: string) => void } = {},
+): Promise<Channel & { close(): Promise<void> }> {
   const app = await Spectrum({
     projectId: env("SPECTRUM_PROJECT_ID"),
     projectSecret: env("SPECTRUM_PROJECT_SECRET"),
@@ -42,6 +80,10 @@ export async function connect(env: (name: string) => string, seen: (message: Rea
   const im = imessage(app);
   const owner = env("OWNER");
   const space = await im.space.create(await im.user(owner));
+  hooks.bind?.(
+    async (buf, mimeType, name) => void (await space.send(attachment(buf, { mimeType, name }))),
+    env("SPECTRUM_PHONE"),
+  );
 
   async function* messages() {
     for await (const [chat, message] of app.messages) {
@@ -51,13 +93,16 @@ export async function connect(env: (name: string) => string, seen: (message: Rea
         console.warn(`ignoring message from ${message.sender?.id}${group ? " in a group chat" : ""}`);
         continue;
       }
-      seen(message);
+      hooks.seen?.(message);
       yield { text: message.content.text };
     }
   }
 
   // Close the connection on shutdown: Photon keeps delivering to a dropped one for a while, so the next one hears nothing.
-  const close = () => app.stop();
+  const close = () => {
+    hooks.bind?.(undefined, "");
+    return app.stop();
+  };
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => void close().finally(() => process.exit(0)));
 
   return {
@@ -70,9 +115,9 @@ export async function connect(env: (name: string) => string, seen: (message: Rea
   };
 }
 
-const tapback = tapbacks();
+const channelTools = spectrumTools();
 export default {
-  prompt: "A tapback (`react`) is a fine acknowledgment or answer on its own.",
-  channel: (ctx) => connect(ctx.env, tapback.seen),
-  tools: async () => tapback.tools,
+  prompt: "A tapback (`react`) is a fine acknowledgment or answer on its own. Use `send_contact_card` when the owner asks for your contact card (.vcf).",
+  channel: (ctx) => connect(ctx.env, channelTools),
+  tools: async () => channelTools.tools,
 } satisfies Plugin;

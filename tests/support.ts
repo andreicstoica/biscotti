@@ -6,7 +6,7 @@ import { runAgent } from "../core/src/agent.ts";
 import { start } from "../core/src/biscotti.ts";
 import { openDb } from "../core/src/memory.ts";
 import type { Context, Plugin } from "../core/src/plugin.ts";
-import { asTexts, tapbacks } from "../plugins/channels/spectrum/index.ts";
+import { asTexts, spectrumTools } from "../plugins/channels/spectrum/index.ts";
 
 // biscotti as main.ts starts it, with a stand-in phone that splits texts and takes tapbacks as iMessage does: `say`
 // texts it (resolving once it replied), `sent` is its texts.
@@ -34,7 +34,7 @@ export async function boot(names: (string | Plugin)[], dir = newDataDir(), resta
   const sent: string[] = [];
   const images: Buffer[] = [];
   const reactions: string[] = [];
-  const tapback = tapbacks();
+  const tapback = spectrumTools();
   const phone: Plugin = {
     channel: async () => ({
       messages: (async function* () {})(),
